@@ -11,7 +11,8 @@ const RECIPES = [
   { id: 'campfire', name: '모닥불', cost: { wood: 5, stone: 3 }, desc: '고기 굽기 · 맹수 퇴치 · 회복' },
   { id: 'wall', name: '나무 방벽', cost: { wood: 4 }, desc: '길을 막는 방벽' },
   { id: 'bandage', name: '붕대', cost: { fiber: 3 }, desc: '체력 35 회복' },
-  { id: 'armor', name: '가죽 갑옷', cost: { hide: 5, fiber: 2 }, desc: '받는 피해 40% 감소', once: true },
+  { id: 'armor', name: '가죽 갑옷', cost: { hide: 5, fiber: 2 }, desc: '피해 40% 감소 · 추위 막아줌', once: true },
+  { id: 'backpack', name: '가죽 가방', cost: { hide: 4, fiber: 4 }, desc: `들 수 있는 무게 ${BASE_CAPACITY} → ${BACKPACK_CAPACITY}kg`, once: true },
 ];
 
 class Input {
@@ -87,6 +88,7 @@ class Game {
     this.selected = 0;
     this.deathCause = '';
     this.hurtFlash = 0;
+    this.tempState = 'ok'; this.weightWarned = false;
     this.world.buildMinimap(this.minimap);
     // 초기 공룡
     for (let k = 0; k < 5; k++) this.trySpawn('para', 8, 20);
@@ -106,6 +108,47 @@ class Game {
     if (p < 0.70) return (p - 0.58) / 0.12 * MAX;
     if (p < 0.92) return MAX;
     return (1 - (p - 0.92) / 0.08) * MAX;
+  }
+
+  // 위치별 기온(°C): 낮에는 덥고 밤에는 춥다. 모래는 낮에 더 뜨겁고, 숲은 완만하다
+  ambientTemp(x, y) {
+    const p = this.phase();
+    let t, sun = 0;
+    if (p < 0.6) { sun = Math.sin(p / 0.6 * Math.PI); t = 20 + 10 * sun; }
+    else if (p < 0.7) t = lerp(20, 9, (p - 0.6) / 0.1);
+    else if (p < 0.92) t = 9 - 3 * Math.sin((p - 0.7) / 0.22 * Math.PI);
+    else t = lerp(9, 20, (p - 0.92) / 0.08);
+    const w = this.world, tx = Math.floor(x / TILE), ty = Math.floor(y / TILE);
+    const g = w.groundAt(tx, ty);
+    if (g === GR.SAND) t += 6 * sun;
+    if (g === GR.FOREST) t += sun > 0 ? -3 * sun : 2;
+    if (w.isWater(tx + 1, ty) || w.isWater(tx - 1, ty) || w.isWater(tx, ty + 1) || w.isWater(tx, ty - 1)) t -= 1.5;
+    const f = w.nearestFire(x, y, 90);
+    // 모닥불은 기온을 쾌적한 25°C 쪽으로 끌어올린다 (더 뜨겁게 만들지는 않음)
+    if (f) t += (Math.max(t, 25) - t) * clamp(1.4 * (1 - f.d / 90), 0, 1);
+    return t;
+  }
+
+  carryWeight() {
+    const p = this.player;
+    let kg = 0;
+    for (const [k, n] of Object.entries(p.inv)) kg += (ITEM_WEIGHT[k] || 0) * n;
+    kg += (p.weapon ? 2 : 0) + (p.hasAxe ? 2 : 0) + (p.armor ? 4 : 0) + (p.backpack ? 1 : 0);
+    return kg;
+  }
+  capacity() { return this.player.backpack ? BACKPACK_CAPACITY : BASE_CAPACITY; }
+
+  dropItem(item, n) {
+    const p = this.player;
+    n = Math.min(n, p.inv[item] || 0);
+    if (n <= 0) { SFX.play('deny'); return; }
+    p.inv[item] -= n;
+    for (let k = 0; k < n; k++) {
+      const pk = new Pickup(item, p.x + p.faceX * 10 + rand(-3, 3), p.y + p.faceY * 6 + rand(-2, 2));
+      pk.armed = false; pk.vx = p.faceX * 30 + rand(-10, 10); pk.vy = p.faceY * 20 + rand(-6, 6);
+      this.pickups.push(pk);
+    }
+    this.floatText(p.x, p.y - 22, `-${n} ${ITEM_NAMES[item]}`, '#c8b8a0');
   }
 
   // ---------- 헬퍼 ----------
@@ -307,6 +350,7 @@ class Game {
     } else if (it.type === 'drink') {
       if (p.thirst >= 99.5) return;
       p.thirst = Math.min(100, p.thirst + 25);
+      if (p.temp > 37) p.temp = Math.max(37, p.temp - 0.4);
       this.floatText(p.x, p.y - 22, '+25 수분', '#7cc4ff');
       const { tx, ty } = this.frontTile(14);
       this.burst(tx * TILE + 8, ty * TILE + 8, '#9fd0ff', 6, 30);
@@ -367,7 +411,7 @@ class Game {
   }
   hasCrafted(id) {
     const p = this.player;
-    return (id === 'axe' && p.hasAxe) || (id === 'spear' && p.weapon >= 1) || (id === 'bonespear' && p.weapon >= 2) || (id === 'armor' && p.armor);
+    return (id === 'axe' && p.hasAxe) || (id === 'spear' && p.weapon >= 1) || (id === 'bonespear' && p.weapon >= 2) || (id === 'armor' && p.armor) || (id === 'backpack' && p.backpack);
   }
   craft(r) {
     const p = this.player;
@@ -378,6 +422,7 @@ class Game {
       case 'spear': p.weapon = Math.max(p.weapon, 1); break;
       case 'bonespear': p.weapon = 2; break;
       case 'armor': p.armor = true; break;
+      case 'backpack': p.backpack = true; break;
       default: p.inv[r.id] = (p.inv[r.id] || 0) + 1;
     }
     this.notify(`${r.name} 제작 완료!`, '#b8e986');
@@ -436,6 +481,14 @@ class Game {
     p.update(dt, this);
     if (p.dead) return;
 
+    if (inp.mouse.clicked && this.resRects) {
+      for (const [k, r] of this.resRects) {
+        if (inp.mouse.x >= r.x && inp.mouse.x <= r.x + r.w && inp.mouse.y >= r.y && inp.mouse.y <= r.y + r.h) {
+          this.dropItem(k, inp.down('ShiftLeft') || inp.down('ShiftRight') ? 5 : 1);
+          inp.mouse.clicked = false; inp.mouse.down = false;
+        }
+      }
+    }
     if (inp.mouse.clicked && this.hotbarRects) {
       for (let k = 0; k < this.hotbarRects.length; k++) {
         const r = this.hotbarRects[k];
@@ -456,6 +509,7 @@ class Game {
       this.attack();
     }
     if (inp.hit('KeyE')) this.interact();
+    if (inp.hit('KeyX')) this.dropItem(HOTBAR[this.selected], 1);
     if (inp.hit('KeyF') || inp.hit('KeyQ') || inp.mouse.rclicked) this.useSelected();
 
     this.world.update(dt, p);
@@ -498,6 +552,17 @@ class Game {
     if (this.spawnT <= 0) { this.spawnT = 1.5; this.spawnTick(); }
     this.mapT -= dt;
     if (this.mapT <= 0) { this.mapT = 2; this.world.buildMinimap(this.minimap); }
+
+    // 체온/무게 경고 (상태가 바뀔 때만)
+    const ts = p.temp < 35 ? 'cold' : p.temp > 39 ? 'hot' : 'ok';
+    if (ts !== this.tempState) {
+      if (ts === 'cold') this.notify('몸이 얼어붙는다... 모닥불 곁으로 가자', '#9fd0ff');
+      if (ts === 'hot') this.notify('너무 덥다... 그늘(숲)이나 물가로 가자', '#ff9a5a');
+      this.tempState = ts;
+    }
+    const over = this.carryWeight() > this.capacity();
+    if (over && !this.weightWarned) this.notify('짐이 너무 무겁다! (X 또는 자원 아이콘 클릭으로 버리기)', '#e8c890');
+    this.weightWarned = over;
 
     // 경고
     if (p.hunger < 20 && Math.random() < dt * 0.08) this.notify('배가 고프다...', '#ffb27a');
@@ -664,6 +729,16 @@ class Game {
     const C = this.ctx;
     C.imageSmoothingEnabled = false;
     C.drawImage(this.low, 0, 0, LW * this.zoom, LH * this.zoom);
+    const pt = this.player.temp;
+    if (this.state !== 'title' && (pt < 35.5 || pt > 38.8)) {
+      const cold = pt < 35.5;
+      const a = Math.min(0.45, (cold ? 35.5 - pt : pt - 38.8) * 0.18 + 0.05);
+      const W = this.canvas.width, H = this.canvas.height;
+      const gr = C.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+      gr.addColorStop(0, 'rgba(0,0,0,0)');
+      gr.addColorStop(1, cold ? `rgba(140,200,255,${a})` : `rgba(255,110,30,${a})`);
+      C.fillStyle = gr; C.fillRect(0, 0, W, H);
+    }
     if (this.hurtFlash > 0) { C.fillStyle = `rgba(200,20,40,${this.hurtFlash})`; C.fillRect(0, 0, this.canvas.width, this.canvas.height); }
 
     this.renderUI();
@@ -739,7 +814,7 @@ class Game {
     C.drawImage(img, Math.round(x + (s - img.width * scale) / 2), Math.round(y + (s - img.height * scale) / 2), img.width * scale, img.height * scale);
   }
 
-  bar(x, y, w, h, v, max, col, label) {
+  bar(x, y, w, h, v, max, col, label, valueText) {
     const C = this.ctx;
     C.fillStyle = '#1a1220'; C.fillRect(x - 2, y - 2, w + 4, h + 4);
     C.fillStyle = '#3a3048'; C.fillRect(x, y, w, h);
@@ -748,7 +823,7 @@ class Game {
     C.fillStyle = 'rgba(255,255,255,0.25)'; C.fillRect(x, y, fw, Math.max(2, h / 4));
     if (v / max < 0.2 && Math.floor(performance.now() / 300) % 2) { C.fillStyle = 'rgba(255,255,255,0.3)'; C.fillRect(x, y, fw, h); }
     this.text(label, x + 6, y + Math.round(h / 2) - 7 * this.ui, 13, '#fff');
-    this.text(`${Math.ceil(v)}`, x + w - 6, y + Math.round(h / 2) - 7 * this.ui, 13, '#fff', 'right');
+    this.text(valueText ?? `${Math.ceil(v)}`, x + w - 6, y + Math.round(h / 2) - 7 * this.ui, 13, '#fff', 'right');
   }
 
   renderUI() {
@@ -767,18 +842,34 @@ class Game {
 
     // 상태 바
     const bw = Math.round(200 * u), bh = Math.round(18 * u), bx = 16, by = 16;
-    this.panel(bx - 8, by - 8, bw + 16, bh * 4 + 16 + 3 * 8);
+    const NB = 6;
+    this.panel(bx - 8, by - 8, bw + 16, bh * NB + 16 + (NB - 1) * 8);
     this.bar(bx, by, bw, bh, p.hp, p.maxHp, '#d8344a', '체력');
     this.bar(bx, by + (bh + 8), bw, bh, p.hunger, 100, '#e8923a', '포만감');
     this.bar(bx, by + (bh + 8) * 2, bw, bh, p.thirst, 100, '#3a8ee8', '수분');
     this.bar(bx, by + (bh + 8) * 3, bw, bh, p.stamina, 100, '#e8d03a', '기력');
+    // 체온: 32~42°C 범위. 정상 35.5~38.8
+    const tCol = p.temp < 35 ? '#6ab8ff' : p.temp < 35.5 ? '#9fd0ff' : p.temp > 39 ? '#ff5a2e' : p.temp > 38.8 ? '#ffa04a' : '#5ec26a';
+    const tLabel = p.temp < 35 ? '체온 (저체온)' : p.temp > 39 ? '체온 (고열)' : '체온';
+    const tWarn = p.temp < 35 || p.temp > 39;
+    this.bar(bx, by + (bh + 8) * 4, bw, bh, tWarn ? 1 : p.temp - 32, tWarn ? 5 : 10, tCol, tLabel, `${p.temp.toFixed(1)}°C`);
+    if (!tWarn) { // 정상 범위 표시
+      C.fillStyle = 'rgba(255,255,255,0.55)';
+      C.fillRect(bx + bw * 0.35, by + (bh + 8) * 4 + bh - 2, bw * 0.33, 2);
+    }
+    // 무게
+    const kg = this.carryWeight(), cap = this.capacity();
+    const wCol = kg > cap ? '#d8344a' : kg > cap * 0.7 ? '#d89a3a' : '#a08a6a';
+    this.bar(bx, by + (bh + 8) * 5, bw, bh, Math.min(kg, cap), cap, wCol, kg > cap ? '무게 (과적)' : '무게', `${kg.toFixed(1)}/${cap}kg`);
 
-    // 자원
-    const ry = by + (bh + 8) * 4 + 14, rs = Math.round(28 * u);
+    // 자원 (클릭하면 1개, Shift+클릭하면 5개 버리기)
+    const ry = by + (bh + 8) * NB + 14, rs = Math.round(28 * u);
+    this.resRects = [];
     const res = ['wood', 'stone', 'fiber', 'hide', 'bone'];
     this.panel(bx - 8, ry - 6, bw + 16, rs + 12);
     res.forEach((k, i) => {
       const x = bx + i * Math.round(42 * u);
+      this.resRects.push([k, { x, y: ry, w: Math.round(40 * u), h: rs }]);
       this.icon(k, x, ry, rs);
       this.text(`${p.inv[k]}`, x + rs + 1, ry + rs - 14 * u, 13, '#fff');
     });
@@ -786,7 +877,7 @@ class Game {
     const ey = ry + rs + 18;
     const equip = [];
     if (p.weapon === 1) equip.push('spear'); if (p.weapon === 2) equip.push('bonespear');
-    if (p.hasAxe) equip.push('axe'); if (p.armor) equip.push('armor');
+    if (p.hasAxe) equip.push('axe'); if (p.armor) equip.push('armor'); if (p.backpack) equip.push('backpack');
     if (equip.length) {
       this.panel(bx - 8, ey - 6, equip.length * Math.round(40 * u) + 16, rs + 12);
       equip.forEach((k, i) => this.icon(k, bx + i * Math.round(40 * u), ey, rs));
@@ -794,9 +885,9 @@ class Game {
 
     // 시계
     const day = this.dayNum(), night = this.isNight();
-    const cw = Math.round(180 * u);
+    const cw = Math.round(220 * u);
     this.panel(W / 2 - cw / 2, 10, cw, Math.round(44 * u));
-    this.text(`${day}일째`, W / 2, 16, 18, night ? '#9fb4ff' : '#ffe9a8', 'center');
+    this.text(`${day}일째 · 기온 ${Math.round(p.ambient)}°C`, W / 2, 16, 17, night ? '#9fb4ff' : '#ffe9a8', 'center');
     const ph = this.phase();
     const tw = cw - 24, tx = W / 2 - tw / 2, tyy = 16 + 24 * u;
     C.fillStyle = '#3a3048'; C.fillRect(tx, tyy, tw, 6 * u);
@@ -865,7 +956,7 @@ class Game {
 
     // 조작법
     if (W > 900) {
-      const lines = ['WASD 이동 · Shift 달리기', '클릭/Space 공격·채집', 'E 상호작용 · F 사용', '1~6 선택 · C 제작 · M 지도'];
+      const lines = ['WASD 이동 · Shift 달리기', '클릭/Space 공격·채집', 'E 상호작용 · F 사용 · X 버리기', '1~6 선택 · C 제작 · M 지도'];
       lines.forEach((l, i) => this.text(l, 16, H - 20 - (lines.length - i) * 18 * u, 12, 'rgba(255,255,255,0.75)'));
     }
 

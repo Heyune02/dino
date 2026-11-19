@@ -14,6 +14,13 @@ function moveWithCollision(e, world, dx, dy) {
   return moved;
 }
 
+// 아이템 무게 (kg)
+const ITEM_WEIGHT = {
+  wood: 1.0, stone: 1.5, fiber: 0.2, hide: 0.8, bone: 0.6, berry: 0.1, meat: 0.5,
+  cooked: 0.4, bandage: 0.1, campfire: 6, wall: 4,
+};
+const BASE_CAPACITY = 50, BACKPACK_CAPACITY = 90;
+
 const WEAPONS = [
   { name: '맨손', dmg: 2, reach: 12 },
   { name: '돌창', dmg: 6, reach: 17 },
@@ -32,7 +39,8 @@ class Player {
     this.anim = 0; this.moving = false;
     this.invT = 0; this.hurtT = 0;
     this.kx = 0; this.ky = 0;
-    this.weapon = 0; this.hasAxe = false; this.armor = false;
+    this.weapon = 0; this.hasAxe = false; this.armor = false; this.backpack = false;
+    this.temp = 37; this.ambient = 22;
     this.inv = { wood: 0, stone: 0, fiber: 0, hide: 0, bone: 0, berry: 2, meat: 0, cooked: 0, bandage: 0, campfire: 0, wall: 0 };
     this.dead = false;
     this.sprinting = false;
@@ -52,11 +60,16 @@ class Player {
       if (Math.abs(mx) > Math.abs(my)) this.face = mx > 0 ? 'right' : 'left';
       else this.face = my > 0 ? 'down' : 'up';
     }
+    // 무게: 70% 이상이면 느려지고, 초과하면 달릴 수 없다
+    const wr = game.carryWeight() / game.capacity();
+    const over = wr > 1;
     const wantSprint = inp.down('ShiftLeft') || inp.down('ShiftRight');
-    this.sprinting = wantSprint && this.moving && this.stamina > 1;
-    const speed = this.sprinting ? 112 : 72;
+    this.sprinting = wantSprint && this.moving && this.stamina > 1 && !over;
+    let speed = this.sprinting ? 112 : 72;
+    speed *= over ? 0.55 : wr > 0.7 ? 1 - (wr - 0.7) / 0.3 * 0.2 : 1;
+    const staRegen = (over ? 0.5 : 1) * (this.temp < 35 ? 0.5 : 1);
     if (this.sprinting) this.stamina = Math.max(0, this.stamina - 22 * dt);
-    else this.stamina = Math.min(100, this.stamina + (this.moving ? 10 : 18) * dt);
+    else this.stamina = Math.min(100, this.stamina + (this.moving ? 10 : 18) * staRegen * dt);
 
     this.kx *= Math.pow(0.0005, dt); this.ky *= Math.pow(0.0005, dt);
     moveWithCollision(this, game.world, (mx * speed + this.kx) * dt, (my * speed + this.ky) * dt);
@@ -64,18 +77,31 @@ class Player {
 
     this.atkCd -= dt; this.atkT -= dt; this.invT -= dt; this.hurtT -= dt;
 
+    // 체온: 기온을 따라 서서히 변한다. 가죽 갑옷은 추위를 절반으로 막아준다
+    this.ambient = game.ambientTemp(this.x, this.y);
+    let off = this.ambient - 22;
+    if (this.armor) off *= off < 0 ? 0.5 : 1.15;
+    const target = 37 + off * 0.18 + (this.sprinting ? 1.2 : 0) + (over ? 0.4 : 0);
+    this.temp += (target - this.temp) * Math.min(1, 0.045 * dt);
+
     // 생존 수치
     const sprintMul = this.sprinting ? 1.8 : 1;
-    this.hunger = Math.max(0, this.hunger - 0.32 * dt * sprintMul);
-    this.thirst = Math.max(0, this.thirst - 0.45 * dt * sprintMul);
+    const coldMul = this.temp < 36 ? 1.4 : 1;
+    const heatMul = this.temp > 38.5 ? 1 + (this.temp - 38.5) : 1;
+    this.hunger = Math.max(0, this.hunger - 0.32 * dt * sprintMul * coldMul);
+    this.thirst = Math.max(0, this.thirst - 0.45 * dt * sprintMul * heatMul);
     let regen = 0;
     if (this.hunger <= 0) regen -= 1.5;
     if (this.thirst <= 0) regen -= 2;
-    if (this.hunger > 50 && this.thirst > 50) regen += 0.6;
+    if (this.temp < 34) regen -= 1.2;
+    if (this.temp > 40) regen -= 1.2;
+    if (this.hunger > 50 && this.thirst > 50 && this.temp > 35.5 && this.temp < 38.8) regen += 0.6;
     const fire = game.world.nearestFire(this.x, this.y, 40);
     if (fire) regen += 1.6;
     if (regen) this.hp = clamp(this.hp + regen * dt, 0, this.maxHp);
-    if (this.hp <= 0 && !this.dead) game.onPlayerDeath(this.hunger <= 0 ? '굶주림' : this.thirst <= 0 ? '탈수' : '부상');
+    if (this.hp <= 0 && !this.dead) {
+      game.onPlayerDeath(this.temp < 34 ? '저체온증' : this.temp > 40 ? '열사병' : this.hunger <= 0 ? '굶주림' : this.thirst <= 0 ? '탈수' : '부상');
+    }
   }
 
   sprite() {
@@ -240,6 +266,7 @@ class Pickup {
   constructor(item, x, y) {
     this.item = item; this.x = x; this.y = y;
     this.hw = 1; this.hh = 1;
+    this.armed = true; // 버린 아이템은 플레이어가 멀어진 뒤에야 다시 주워진다
     this.t = 0; this.z = 6; this.vz = rand(40, 70);
     this.vx = rand(-20, 20); this.vy = rand(-10, 10);
     this.dead = false;
@@ -250,7 +277,8 @@ class Pickup {
     if (this.z <= 0) { this.z = 0; this.vz = Math.abs(this.vz) > 25 ? -this.vz * 0.4 : 0; this.vx *= 0.6; this.vy *= 0.6; }
     const p = game.player;
     const d = dist(p.x, p.y - 4, this.x, this.y);
-    if (this.t > 0.4 && d < 30 && !p.dead) {
+    if (!this.armed && d > 36) this.armed = true;
+    if (this.armed && this.t > 0.4 && d < 30 && !p.dead) {
       const s = 160 * dt;
       this.x += (p.x - this.x) / d * s; this.y += (p.y - 4 - this.y) / d * s;
       if (d < 7) {

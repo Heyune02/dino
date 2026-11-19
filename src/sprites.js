@@ -316,6 +316,7 @@ const ICON_ROWS = {
   spear: ['      rR', '     rRR', '    TrR ', '   T    ', '  T     ', ' T      ', 'T       '],
   bonespear: ['      ww', '     www', '    Tww ', '   T    ', '  T     ', ' T      ', 'T       '],
   armor: ['HH  HH', 'HHHHHH', 'HhHHhH', 'HHHHHH', 'HHHHHH'],
+  backpack: ['  hh  ', ' h  h ', 'HHHHHH', 'HhHHhH', 'HHHHHH', 'HHhhHH', ' HHHH '],
 };
 
 // ---------- 지형 타일 (절차적 생성) ----------
